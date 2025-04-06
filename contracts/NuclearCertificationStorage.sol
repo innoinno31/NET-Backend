@@ -9,8 +9,8 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 /**
  * @title NuclearCertificationStorage
  * @author Franck
- * @notice Contrat de stockage pour la certification nucléaire
- * @dev Implémente les structures de données, les enums, les events et les mappings
+ * @notice Storage contract for nuclear certification
+ * @dev Implements data structures, enums, events, and mappings
  */
 contract NuclearCertificationStorage is AccessControl, ERC721 {
     /** Enums */
@@ -34,7 +34,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     enum DocumentStatus {
         Submitted,
         Pending,
-        Verified,
         Rejected,
         Deprecated
     }
@@ -48,12 +47,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     }
 
     /** Structures */
-    struct CertificationData {
-        bytes32 hashGlobal;
-        uint256 timestamp;
-        address certifier;
-    }
-
     struct Plant {
         uint256 id;
         string name;
@@ -83,7 +76,8 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         uint256 rejectedAt;
         uint256 pendingAt;
         uint256 deprecatedAt;
-        string finalCertificationHash;
+        bytes32 finalCertificationHash;
+        string rejectionReason;
     }
 
     struct Document {
@@ -94,7 +88,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         DocumentStatus status;
         address submitter;
         uint256 submittedAt;
-        uint256 verifiedAt;
         uint256 rejectedAt;
         uint256 pendingAt;
         uint256 deprecatedAt;
@@ -169,13 +162,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         uint256 timestamp
     );
     
-    event DocumentVerified(
-        uint256 indexed documentId,
-        uint256 indexed equipmentId,
-        address indexed verifier,
-        uint256 timestamp
-    );
-    
     event DocumentRejected(
         uint256 indexed documentId,
         uint256 indexed equipmentId,
@@ -203,18 +189,9 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         string reason,
         uint256 timestamp
     );
-    
-    event IntegrityVerified(
-        uint256 indexed equipmentId,
-        bytes32 hashGlobal,
-        bool isValid,
-        address verifier,
-        uint256 timestamp
-    );
 
     /** Custom errors */
     error EquipmentNotFound(uint256 equipmentId);
-    error EquipmentAlreadyExists(uint256 equipmentId);
     error EquipmentNotPending(uint256 equipmentId);
     error EquipmentAlreadyRejected(uint256 equipmentId);
     error EquipmentDeprecated(uint256 equipmentId);
@@ -222,22 +199,9 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     error EquipmentNotUnderReview(uint256 equipmentId);
 
     error DocumentNotFound(uint256 documentId);
-    error DocumentAlreadyExists(uint256 documentId);
-    error DocumentNotPending(uint256 documentId);
-    error DocumentAlreadyRejected(uint256 documentId);
-    error DocumentDeprecated(uint256 documentId);
-    error DocumentTypeNotExpected(uint256 equipmentId, DocumentType docType);
-    error DocumentSubmissionNotAllowed(uint256 equipmentId);
-    error MissingRequiredDocuments(uint256 equipmentId);
-
-    error UnauthorizedRole(address caller);
-    error RoleAlreadyAssigned(address actor, bytes32 role);
-    error RoleNotAllowedForAction(bytes32 role);
-    error ActorNotRegistered(address actor);
     error UnauthorizedDocumentAccess(uint256 documentId, address caller);
     error SoulboundTokenNonTransferableAndNotBurnable(uint256 tokenId);
 
-    error InvalidOperation(string message);
     error PlantNotFound(uint256 plantId);
     error InvalidInput(string reason);
     error ActionNotAllowedInCurrentStep(uint256 equipmentId, CertificationSteps step);
@@ -248,6 +212,7 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     bytes32 public constant LABORATORY = keccak256("LABORATORY");
     bytes32 public constant REGULATORY_AUTHORITY = keccak256("REGULATORY_AUTHORITY");
     bytes32 public constant CERTIFICATION_OFFICER = keccak256("CERTIFICATION_OFFICER");
+    bytes32 public constant IMPL_ROLE = keccak256("IMPL_ROLE");
 
     /** Id Counters */
     uint256 private nextEquipmentId;
@@ -256,25 +221,31 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     uint256 private nextActorId;
 
     /** Mappings */
-    mapping(address => uint256[]) private _actorToPlants;
-    mapping(uint256 => Plant) private _plants;
-    mapping(uint256 => Equipment) private _equipments;
-    mapping(uint256 => Document) private _documents;
-    mapping(uint256 => uint256) private _equipmentToPlant;
-    mapping(uint256 => uint256[]) private _plantToEquipments;
-    mapping(uint256 => uint256) private _documentToEquipment;
-    mapping(uint256 => uint256[]) private _equipmentToDocuments;
-    mapping(uint256 => CertificationData) private _equipmentCertifications;
-    mapping(DocumentType => mapping(bytes32 => bool)) private _documentAccessByRole;
-    
-    // Array to store all plant IDs for retrieval
-    uint256[] private _allPlantIds;
 
-    // Mapping to store actors
+    // === Plant Mappings ===
+    mapping(uint256 => Plant) private _plants;
+    mapping(uint256 => uint256[]) private _plantToEquipments;
+    mapping(uint256 => uint256[]) private _plantToActorIds;
+
+    // === Equipment Mappings ===
+    mapping(uint256 => Equipment) private _equipments;
+    mapping(uint256 => uint256) private _equipmentToPlant;
+    mapping(uint256 => uint256[]) private _equipmentToDocuments;
+
+    // === Document Mappings ===
+    mapping(uint256 => Document) private _documents;
+    mapping(uint256 => uint256) private _documentToEquipment;
+    mapping(DocumentType => mapping(bytes32 => bool)) private _documentAccessByRole;
+
+    // === Actor Mappings ===
     mapping(uint256 => Actor) private _actors;
     
-    // Array to store all actor IDs for retrieval
-    uint256[] private _allActorIds;
+    // === Implementation Contract ===    
+    address private _implContractAddress;
+
+    /** State Arrays (for iteration helpers) */
+    uint256[] private _allPlantIds; // Array of all registered plant IDs
+    uint256[] private _allActorIds; // Array of all registered actor IDs
 
     /**
      * @notice Contract constructor
@@ -303,12 +274,12 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         _documentAccessByRole[DocumentType.Compliance][PLANT_OPERATOR_ADMIN] = true;
         _documentAccessByRole[DocumentType.RegulatoryReview][PLANT_OPERATOR_ADMIN] = true;
         
-        // 3. Certification Officer (Bureau Veritas) - full access for certification
+        // 3. Certification Officer - Same access as Manufacturer/Lab (TechFile, LabReport, Certification)
         _documentAccessByRole[DocumentType.Certification][CERTIFICATION_OFFICER] = true;
         _documentAccessByRole[DocumentType.LabReport][CERTIFICATION_OFFICER] = true;
         _documentAccessByRole[DocumentType.TechFile][CERTIFICATION_OFFICER] = true;
-        _documentAccessByRole[DocumentType.Compliance][CERTIFICATION_OFFICER] = true;
-        _documentAccessByRole[DocumentType.RegulatoryReview][CERTIFICATION_OFFICER] = true;
+        _documentAccessByRole[DocumentType.Compliance][CERTIFICATION_OFFICER] = false;
+        _documentAccessByRole[DocumentType.RegulatoryReview][CERTIFICATION_OFFICER] = false;
         
         // 4. Manufacturer - only tech files and final certification
         _documentAccessByRole[DocumentType.Certification][MANUFACTURER] = true;
@@ -356,7 +327,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _equipmentId Equipment ID
      * @return The equipment data
      */
-    function getEquipment(uint256 _equipmentId) external view returns (Equipment memory) {
+    function getEquipment(uint256 _equipmentId)
+        external
+        view
+        returns (Equipment memory)
+    {
         return _equipments[_equipmentId];
     }
 
@@ -365,7 +340,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _documentId Document ID 
      * @return The document data
      */
-    function getDocument(uint256 _documentId) external view returns (Document memory) {
+    function getDocument(uint256 _documentId)
+        external
+        view
+        returns (Document memory)
+    {
         return _documents[_documentId];
     }
 
@@ -374,7 +353,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _plantId Plant ID
      * @return The plant data
      */
-    function getPlant(uint256 _plantId) external view returns (Plant memory) {
+    function getPlant(uint256 _plantId)
+        external
+        view
+        returns (Plant memory)
+    {
         return _plants[_plantId];
     }
 
@@ -383,17 +366,12 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _equipmentId Equipment ID
      * @return Array of document IDs
      */
-    function getEquipmentDocuments(uint256 _equipmentId) external view returns (uint256[] memory) {
+    function getEquipmentDocuments(uint256 _equipmentId)
+        external
+        view
+        returns (uint256[] memory)
+    {
         return _equipmentToDocuments[_equipmentId];
-    }
-
-    /**
-     * @notice Gets certification data for an equipment
-     * @param _equipmentId Equipment ID
-     * @return The certification data
-     */
-    function getEquipmentCertification(uint256 _equipmentId) external view returns (CertificationData memory) {
-        return _equipmentCertifications[_equipmentId];
     }
 
     /**
@@ -402,12 +380,17 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _role Role to check
      * @return True if access is allowed
      */
-    function hasDocumentAccess(DocumentType _docType, bytes32 _role) external view returns (bool) {
+    function hasDocumentAccess(DocumentType _docType, bytes32 _role)
+        external
+        view
+        returns (bool)
+    {
         return _documentAccessByRole[_docType][_role];
     }
 
     /**
      * @notice Creates a new plant
+     * @dev To be called only by the Impl contract.
      * @param _creator Address of the plant creator
      * @param _name Plant name
      * @param _description Plant description
@@ -421,7 +404,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         string memory _description,
         string memory _location,
         bool _isActive
-    ) external returns (uint256) {
+    )
+        external
+        onlyRole(IMPL_ROLE)
+        returns (uint256)
+    {
         uint256 plantId = nextPlantId++;
         
         Plant memory newPlant = Plant({
@@ -434,7 +421,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         });
         
         _plants[plantId] = newPlant;
-        _actorToPlants[_creator].push(plantId);
         
         // Add the new plant ID to the list of all plant IDs
         _allPlantIds.push(plantId);
@@ -451,6 +437,7 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
 
     /**
      * @notice Creates a new equipment
+     * @dev To be called only by the Impl contract.
      * @param _creator Address of the equipment creator (owner)
      * @param _name Equipment name
      * @param _description Equipment description
@@ -462,7 +449,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         string memory _name,
         string memory _description,
         uint256 _plantId
-    ) external returns (uint256) {
+    )
+        external
+        onlyRole(IMPL_ROLE)
+        returns (uint256)
+    {
         if (bytes(_name).length == 0) {
             revert InvalidInput("Name cannot be empty");
         }
@@ -484,7 +475,8 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
             rejectedAt: 0,
             pendingAt: 0,
             deprecatedAt: 0,
-            finalCertificationHash: ""
+            finalCertificationHash: bytes32(0),
+            rejectionReason: ""
         });
         
         _equipments[equipmentId] = newEquipment;
@@ -500,6 +492,7 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
 
     /**
      * @notice Creates a new document
+     * @dev To be called only by the Impl contract.
      * @param _submitter Address of the document submitter
      * @param _equipmentId Equipment ID
      * @param _docType Document type
@@ -515,7 +508,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         string memory _name,
         string memory _description,
         string memory _ipfsHash
-    ) external returns (uint256) {
+    )
+        external
+        onlyRole(IMPL_ROLE)
+        returns (uint256)
+    {
         if (_equipments[_equipmentId].registeredAt == 0) {
             revert EquipmentNotFound(_equipmentId);
         }
@@ -530,7 +527,6 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
             status: DocumentStatus.Submitted,
             submitter: _submitter,
             submittedAt: block.timestamp,
-            verifiedAt: 0,
             rejectedAt: 0,
             pendingAt: 0,
             deprecatedAt: 0,
@@ -548,6 +544,7 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
 
     /**
      * @notice Updates an equipment status
+     * @dev To be called only by the Impl contract.
      * @param _updater Address of the updater
      * @param _equipmentId Equipment ID
      * @param _newStatus New status
@@ -558,7 +555,10 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         uint256 _equipmentId,
         EquipmentStatus _newStatus,
         CertificationSteps _newStep
-    ) external {
+    )
+        external
+        onlyRole(IMPL_ROLE)
+    {
         if (_equipments[_equipmentId].registeredAt == 0) {
             revert EquipmentNotFound(_equipmentId);
         }
@@ -577,6 +577,7 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
             equipment.pendingAt = block.timestamp;
         } else if (_newStatus == EquipmentStatus.Certified) {
             equipment.certifiedAt = block.timestamp;
+            equipment.rejectionReason = "";
         } else if (_newStatus == EquipmentStatus.Rejected) {
             equipment.rejectedAt = block.timestamp;
         } else if (_newStatus == EquipmentStatus.Deprecated) {
@@ -605,14 +606,24 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param interfaceId Interface ID to check
      * @return bool True if the interface is supported
      */
-    function supportsInterface(bytes4 interfaceId) public view override(AccessControl, ERC721) returns (bool) {
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(AccessControl, ERC721)
+        returns (bool)
+    {
         return super.supportsInterface(interfaceId);
     }
 
     /**
      * @dev Override to prevent any equipment transfer (Soul Bound Token)
      */
-    function _update(address to, uint256 tokenId, address auth) internal virtual override returns (address) {
+    function _update(address to, uint256 tokenId, address auth)
+        internal
+        virtual
+        override
+        returns (address)
+    {
         address from = _ownerOf(tokenId);
         
         // We allow minting
@@ -627,14 +638,22 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
     /**
      * @dev Override to prevent any transfer approval
      */
-    function approve(address, uint256 tokenId) public virtual override {
+    function approve(address, uint256 tokenId)
+        public
+        virtual
+        override
+    {
         revert SoulboundTokenNonTransferableAndNotBurnable(tokenId);
     }
 
     /**
      * @dev Override to prevent any global approval
      */
-    function setApprovalForAll(address, bool) public virtual override {
+    function setApprovalForAll(address, bool)
+        public
+        virtual
+        override
+    {
         revert SoulboundTokenNonTransferableAndNotBurnable(0);
     }
 
@@ -643,7 +662,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _bytes32 bytes32 value to convert
      * @return Hexadecimal string representation of the bytes32 value
      */
-    function bytes32ToHexString(bytes32 _bytes32) public pure returns (string memory) {
+    function bytes32ToHexString(bytes32 _bytes32)
+        public
+        pure
+        returns (string memory)
+    {
         bytes memory hexChars = "0123456789abcdef";
         bytes memory hexString = new bytes(66); // "0x" + 64 characters
         
@@ -663,7 +686,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @notice Gets all plant IDs registered in the contract
      * @return Array of all plant IDs
      */
-    function getAllPlantIds() external view returns (uint256[] memory) {
+    function getAllPlantIds()
+        external
+        view
+        returns (uint256[] memory)
+    {
         return _allPlantIds;
     }
 
@@ -671,7 +698,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @notice Gets all actor IDs registered in the contract
      * @return Array of all actor IDs
      */
-    function getAllActorIds() external view returns (uint256[] memory) {
+    function getAllActorIds()
+        external
+        view
+        returns (uint256[] memory)
+    {
         return _allActorIds;
     }
 
@@ -680,7 +711,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _plantId The ID of the plant
      * @return Array of equipment IDs
      */
-    function getPlantEquipmentIds(uint256 _plantId) external view returns (uint256[] memory) {
+    function getPlantEquipmentIds(uint256 _plantId)
+        external
+        view
+        returns (uint256[] memory)
+    {
         return _plantToEquipments[_plantId];
     }
 
@@ -689,16 +724,21 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
      * @param _actorId Actor ID
      * @return The actor data
      */
-    function getActor(uint256 _actorId) external view returns (Actor memory) {
+    function getActor(uint256 _actorId)
+        external
+        view
+        returns (Actor memory)
+    {
         return _actors[_actorId];
     }
 
     /**
      * @notice Creates a new actor
+     * @dev To be called only by the Impl contract.
      * @param _name Actor name
      * @param _actorAddress Actor address
      * @param _role Actor role
-     * @param _plantId Plant ID (0 si non associé à une centrale spécifique)
+     * @param _plantId Plant ID
      * @return The actor ID
      */
     function createActor(
@@ -706,7 +746,11 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         address _actorAddress,
         bytes32 _role,
         uint256 _plantId
-    ) external returns (uint256) {
+    )
+        external
+        onlyRole(IMPL_ROLE)
+        returns (uint256)
+    {
         uint256 actorId = nextActorId++;
         
         Actor memory newActor = Actor({
@@ -720,17 +764,111 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         
         _actors[actorId] = newActor;
         _allActorIds.push(actorId);
+
+        // Add actor to the plant's list if associated with a specific plant
+        if (_plantId != 0 && _plants[_plantId].registeredAt != 0) {
+             _plantToActorIds[_plantId].push(actorId);
+        }
         
         return actorId;
     }
 
-    function grantRoleWithCaller(bytes32 role, address account, address caller) external {
+    /**
+     * @notice Grants a role to an account, checking the original caller's admin role.
+     * @dev To be called only by the Impl contract.
+     * @param role The role to grant.
+     * @param account The account to grant the role to.
+     * @param caller The original user who initiated the action in the Impl contract.
+     */
+    function grantRoleWithCaller(
+        bytes32 role,
+        address account,
+        address caller
+    )
+        external
+        onlyRole(IMPL_ROLE)
+    {
         require(hasRole(getRoleAdmin(role), caller), "Caller doesn't have admin role");
         _grantRole(role, account);
     }
 
-    function revokeRoleWithCaller(bytes32 role, address account, address caller) external {
+    /**
+     * @notice Revokes a role from an account, checking the original caller's admin role.
+     * @dev To be called only by the Impl contract.
+     * @param role The role to revoke.
+     * @param account The account to revoke the role from.
+     * @param caller The original user who initiated the action in the Impl contract.
+     */
+    function revokeRoleWithCaller(
+        bytes32 role,
+        address account,
+        address caller
+    )
+        external
+        onlyRole(IMPL_ROLE)
+    {
         require(hasRole(getRoleAdmin(role), caller), "Caller doesn't have admin role");
         _revokeRole(role, account);
+    }
+
+    /**
+     * @notice Sets the address of the implementation contract.
+     * @dev Can only be called once by the DEFAULT_ADMIN_ROLE.
+     * @param implAddress The address of the NuclearCertificationImpl contract.
+     */
+    function setImplementationContract(address implAddress)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_implContractAddress == address(0), "Implementation contract already set");
+        require(implAddress != address(0), "Implementation address cannot be zero");
+        
+        _implContractAddress = implAddress;
+        _grantRole(IMPL_ROLE, implAddress);
+    }
+
+    /**
+     * @notice Sets the final certification hash for a specific equipment
+     * @dev To be called only by the Impl contract via finalizeCertification.
+     * @param _equipmentId The ID of the equipment
+     * @param _finalHash The final hash calculated from document hashes
+     */
+    function setFinalCertificationHash(uint256 _equipmentId, bytes32 _finalHash)
+        external
+        onlyRole(IMPL_ROLE)
+    {
+        if (_equipments[_equipmentId].registeredAt == 0) {
+            revert EquipmentNotFound(_equipmentId);
+        }
+        _equipments[_equipmentId].finalCertificationHash = _finalHash;
+    }
+
+    /**
+     * @notice Sets the rejection reason for a specific equipment
+     * @dev To be called only by the Impl contract via finalizeCertification.
+     * @param _equipmentId The ID of the equipment
+     * @param _reason The rejection reason string
+     */
+    function setRejectionReason(uint256 _equipmentId, string memory _reason)
+        external
+        onlyRole(IMPL_ROLE)
+    {
+        if ( _equipments[_equipmentId].registeredAt == 0) {
+            revert EquipmentNotFound(_equipmentId);
+        }
+        _equipments[_equipmentId].rejectionReason = _reason;
+    }
+
+    /**
+     * @notice Gets the actor IDs associated with a specific plant
+     * @param _plantId The ID of the plant
+     * @return Array of actor IDs
+     */
+    function getPlantActorIds(uint256 _plantId) 
+        external 
+        view 
+        returns (uint256[] memory) 
+    {
+        return _plantToActorIds[_plantId];
     }
 } 

@@ -4,6 +4,20 @@ pragma solidity 0.8.28;
 
 import "./NuclearCertificationStorage.sol";
 
+// Custom Errors 
+error EquipmentNotFound(uint256 equipmentId);
+error EquipmentNotPending(uint256 equipmentId);
+error EquipmentAlreadyDeprecated(uint256 equipmentId);
+error EquipmentAlreadyCertified(uint256 equipmentId);
+error EquipmentNotUnderReview(uint256 equipmentId);
+error DocumentNotFound(uint256 documentId);
+error UnauthorizedDocumentAccess(uint256 documentId, address caller);
+error PlantNotFound(uint256 plantId);
+error InvalidInput(string reason);
+error ActionNotAllowedInCurrentStep(uint256 equipmentId, NuclearCertificationStorage.CertificationSteps step);
+error UnauthorizedRole(address caller);
+error RoleAlreadyAssigned(address actor, bytes32 role);
+
 /**
  * @title NuclearCertificationImpl
  * @author Franck
@@ -21,36 +35,37 @@ contract NuclearCertificationImpl {
     bytes32 public constant REGULATORY_AUTHORITY = keccak256("REGULATORY_AUTHORITY");
     bytes32 public constant CERTIFICATION_OFFICER = keccak256("CERTIFICATION_OFFICER");
     bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
-
-    // Events to emit from this contract - duplicating from storage contract
-    event EquipmentRegistered(
-        uint256 indexed equipmentId,
-        string name,
-        address registeredBy,
-        uint256 timestamp
-    );
-
-    event EquipmentStepUpdated(
-        uint256 indexed equipmentId,
-        NuclearCertificationStorage.CertificationSteps previousStep,
-        NuclearCertificationStorage.CertificationSteps newStep,
-        address updatedBy,
-        uint256 timestamp
-    );
-
-    event DocumentSubmitted(
-        uint256 indexed documentId,
-        uint256 indexed equipmentId,
-        NuclearCertificationStorage.DocumentType docType,
-        address submitter,
-        uint256 timestamp
-    );
+    bytes32 public constant IMPL_ROLE = keccak256("IMPL_ROLE");
 
     event IntegrityVerified(
         uint256 indexed equipmentId,
         bytes32 hashGlobal,
         bool isValid,
         address verifier,
+        uint256 timestamp
+    );
+
+    event ReviewStarted(
+        uint256 indexed equipmentId,
+        address indexed reviewer,
+        uint256 timestamp
+    );
+
+    /**
+     * @dev finalHash The final hash of the certification
+     */
+    event CertificationFinalized(
+        uint256 indexed equipmentId, 
+        address indexed finalizer, 
+        bool approved, 
+        bytes32 finalHash,
+        string reason,
+        uint256 timestamp
+    );
+
+    event EquipmentDeprecated(
+        uint256 indexed equipmentId,
+        address indexed deprecatedBy,
         uint256 timestamp
     );
 
@@ -68,7 +83,11 @@ contract NuclearCertificationImpl {
      * @param _equipmentId Equipment ID
      * @return The equipment data
      */
-    function getEquipment(uint256 _equipmentId) internal view returns (NuclearCertificationStorage.Equipment memory) {
+    function getEquipment(uint256 _equipmentId)
+        internal
+        view
+        returns (NuclearCertificationStorage.Equipment memory)
+    {
         return storageContract.getEquipment(_equipmentId);
     }
 
@@ -77,7 +96,11 @@ contract NuclearCertificationImpl {
      * @param _documentId Document ID
      * @return The document data
      */
-    function getDocument(uint256 _documentId) public view returns (NuclearCertificationStorage.Document memory) {
+    function getDocument(uint256 _documentId)
+        public
+        view
+        returns (NuclearCertificationStorage.Document memory)
+    {
         return storageContract.getDocument(_documentId);
     }
 
@@ -86,7 +109,11 @@ contract NuclearCertificationImpl {
      * @param _equipmentId Equipment ID
      * @return Array of document IDs
      */
-    function getEquipmentDocs(uint256 _equipmentId) internal view returns (uint256[] memory) {
+    function getEquipmentDocs(uint256 _equipmentId)
+        internal
+        view
+        returns (uint256[] memory)
+    {
         return storageContract.getEquipmentDocuments(_equipmentId);
     }
 
@@ -99,10 +126,9 @@ contract NuclearCertificationImpl {
     modifier notCertifiedOrUnderReview(uint256 _equipmentId) {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
-        // Block modifications if equipment is under review except for regulatory authority
         if (equipment.currentStep == NuclearCertificationStorage.CertificationSteps.UnderReview) {
             if (!storageContract.hasRole(REGULATORY_AUTHORITY, msg.sender)) {
-                revert NuclearCertificationStorage.ActionNotAllowedInCurrentStep(_equipmentId, NuclearCertificationStorage.CertificationSteps.UnderReview);
+                revert ActionNotAllowedInCurrentStep(_equipmentId, NuclearCertificationStorage.CertificationSteps.UnderReview);
             }
         }
         
@@ -110,7 +136,7 @@ contract NuclearCertificationImpl {
         if (equipment.status == NuclearCertificationStorage.EquipmentStatus.Certified) {
             if (!storageContract.hasRole(REGULATORY_AUTHORITY, msg.sender) && 
                 !storageContract.hasRole(PLANT_OPERATOR_ADMIN, msg.sender)) {
-                revert NuclearCertificationStorage.EquipmentAlreadyCertified(_equipmentId);
+                revert EquipmentAlreadyCertified(_equipmentId);
             }
         }       
         _;
@@ -121,7 +147,7 @@ contract NuclearCertificationImpl {
      */
     modifier onlyCertificationOfficer() {
         if (!storageContract.hasRole(CERTIFICATION_OFFICER, msg.sender)) {
-            revert NuclearCertificationStorage.UnauthorizedRole(msg.sender);
+            revert UnauthorizedRole(msg.sender);
         }
         _;
     }
@@ -135,7 +161,7 @@ contract NuclearCertificationImpl {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
         if (equipment.status == NuclearCertificationStorage.EquipmentStatus.Deprecated) {
-            revert NuclearCertificationStorage.EquipmentDeprecated(_equipmentId);
+            revert EquipmentAlreadyDeprecated(_equipmentId);
         }      
         _;
     }
@@ -170,7 +196,7 @@ contract NuclearCertificationImpl {
             // Manufacturers can only see their own documents + certification
             if (storageContract.hasRole(MANUFACTURER, msg.sender)) {
                 if (doc.submitter != msg.sender && doc.docType != NuclearCertificationStorage.DocumentType.Certification) {
-                    revert NuclearCertificationStorage.UnauthorizedRole(msg.sender);
+                    revert UnauthorizedRole(msg.sender);
                 }
             } 
             // Labs can see their own documents + tech files + certification
@@ -180,10 +206,10 @@ contract NuclearCertificationImpl {
                     doc.docType != NuclearCertificationStorage.DocumentType.TechFile && 
                     doc.docType != NuclearCertificationStorage.DocumentType.Certification
                 ) {
-                    revert NuclearCertificationStorage.UnauthorizedRole(msg.sender);
+                    revert UnauthorizedRole(msg.sender);
                 }
             } else {
-                revert NuclearCertificationStorage.UnauthorizedRole(msg.sender);
+                revert UnauthorizedRole(msg.sender);
             }
         }
         _;
@@ -195,7 +221,7 @@ contract NuclearCertificationImpl {
      */
     modifier onlyDocumentAuthorized(uint256 _documentId) {
         if (!canViewDocument(_documentId, msg.sender)) {
-            revert NuclearCertificationStorage.UnauthorizedDocumentAccess(_documentId, msg.sender);
+            revert UnauthorizedDocumentAccess(_documentId, msg.sender);
         }
         _;
     }
@@ -216,16 +242,19 @@ contract NuclearCertificationImpl {
     /**
      * @notice Registers a plant operator
      * @param _address Address of the operator to register
-     * @param _plantId ID de la centrale associée 
-     * @param _name Nom de l'opérateur
+     * @param _plantId Associated plant ID
+     * @param _name Operator's name
      */
     function registerPlantOperator(
-        address _address, 
+        address _address,
         uint256 _plantId,
         string memory _name
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    )
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
         if (storageContract.hasRole(PLANT_OPERATOR_ADMIN, _address)) {
-            revert NuclearCertificationStorage.RoleAlreadyAssigned(_address, PLANT_OPERATOR_ADMIN);
+            revert RoleAlreadyAssigned(_address, PLANT_OPERATOR_ADMIN);
         }
 
         storageContract.grantRoleWithCaller(PLANT_OPERATOR_ADMIN, _address, msg.sender);
@@ -236,16 +265,19 @@ contract NuclearCertificationImpl {
     /**
      * @notice Registers a manufacturer
      * @param _address Address of the manufacturer to register
-     * @param _plantId ID de la centrale associée
-     * @param _name Nom du fabricant
+     * @param _plantId Associated plant ID
+     * @param _name Manufacturer's name
      */
     function registerManufacturer(
-        address _address, 
+        address _address,
         uint256 _plantId,
         string memory _name
-    ) external onlyRole(PLANT_OPERATOR_ADMIN) {
+    )
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+    {
         if (storageContract.hasRole(MANUFACTURER, _address)) {
-            revert NuclearCertificationStorage.RoleAlreadyAssigned(_address, MANUFACTURER);
+            revert RoleAlreadyAssigned(_address, MANUFACTURER);
         }
 
         storageContract.grantRoleWithCaller(MANUFACTURER, _address, msg.sender);
@@ -256,16 +288,19 @@ contract NuclearCertificationImpl {
     /**
      * @notice Registers a laboratory
      * @param _address Address of the laboratory to register
-     * @param _plantId ID de la centrale associée
-     * @param _name Nom du laboratoire
+     * @param _plantId Associated plant ID
+     * @param _name Laboratory's name
      */
     function registerLaboratory(
-        address _address, 
+        address _address,
         uint256 _plantId,
         string memory _name
-    ) external onlyRole(PLANT_OPERATOR_ADMIN) {
+    )
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+    {
         if (storageContract.hasRole(LABORATORY, _address)) {
-            revert NuclearCertificationStorage.RoleAlreadyAssigned(_address, LABORATORY);
+            revert RoleAlreadyAssigned(_address, LABORATORY);
         }
 
         storageContract.grantRoleWithCaller(LABORATORY, _address, msg.sender);
@@ -276,16 +311,19 @@ contract NuclearCertificationImpl {
     /**
      * @notice Registers a regulatory authority
      * @param _address Address of the authority to register
-     * @param _plantId ID de la centrale associée (0 si autorité globale)
-     * @param _name Nom de l'autorité de régulation
+     * @param _plantId Associated plant ID
+     * @param _name Authority's name
      */
     function registerRegulatoryAuthority(
-        address _address, 
+        address _address,
         uint256 _plantId,
         string memory _name
-    ) external onlyRole(PLANT_OPERATOR_ADMIN) {
+    )
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+    {
         if (storageContract.hasRole(REGULATORY_AUTHORITY, _address)) {
-            revert NuclearCertificationStorage.RoleAlreadyAssigned(_address, REGULATORY_AUTHORITY);
+            revert RoleAlreadyAssigned(_address, REGULATORY_AUTHORITY);
         }
 
         storageContract.grantRoleWithCaller(REGULATORY_AUTHORITY, _address, msg.sender);
@@ -296,16 +334,19 @@ contract NuclearCertificationImpl {
     /**
      * @notice Registers a certification officer
      * @param _address Address of the officer to register
-     * @param _plantId ID de la centrale associée
-     * @param _name Nom de l'agent de certification
+     * @param _plantId Associated plant ID
+     * @param _name Officer's name
      */
     function registerCertificationOfficer(
-        address _address, 
+        address _address,
         uint256 _plantId,
         string memory _name
-    ) external onlyRole(PLANT_OPERATOR_ADMIN) {
+    )
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+    {
         if (storageContract.hasRole(CERTIFICATION_OFFICER, _address)) {
-            revert NuclearCertificationStorage.RoleAlreadyAssigned(_address, CERTIFICATION_OFFICER);
+            revert RoleAlreadyAssigned(_address, CERTIFICATION_OFFICER);
         }
 
         storageContract.grantRoleWithCaller(CERTIFICATION_OFFICER, _address, msg.sender);
@@ -322,7 +363,11 @@ contract NuclearCertificationImpl {
      * @param _equipmentId The equipment identifier
      * @return An array of document identifiers
      */
-    function getEquipmentDocuments(uint256 _equipmentId) public view returns (uint256[] memory) {
+    function getEquipmentDocuments(uint256 _equipmentId)
+        public
+        view
+        returns (uint256[] memory)
+    {
         return getEquipmentDocs(_equipmentId);
     }
 
@@ -331,7 +376,11 @@ contract NuclearCertificationImpl {
      * @param _equipmentId The equipment identifier
      * @return An array of IPFS hashes
      */
-    function getEquipmentDocumentHashes(uint256 _equipmentId) public view returns (string[] memory) {
+    function getEquipmentDocumentHashes(uint256 _equipmentId)
+        public
+        view
+        returns (string[] memory)
+    {
         uint256[] memory docIds = getEquipmentDocs(_equipmentId);
         string[] memory hashes = new string[](docIds.length);
         
@@ -344,30 +393,29 @@ contract NuclearCertificationImpl {
     }
 
     /**
-     * @notice Verifies the integrity of documents for a certified equipment
+     * @notice Verifies the integrity of documents for a certified or deprecated equipment
      * @param _equipmentId The equipment identifier
      * @param _calculatedHash The global hash calculated off-chain
      * @return bool True if the hash matches, false otherwise
      */
-    function verifyEquipmentIntegrity(
-        uint256 _equipmentId, 
-        bytes32 _calculatedHash
-    ) public view returns (bool) {
+    function verifyEquipmentIntegrity(uint256 _equipmentId, bytes32 _calculatedHash)
+        public
+        view
+        returns (bool)
+    {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
         if (equipment.registeredAt == 0) {
-            revert NuclearCertificationStorage.EquipmentNotFound(_equipmentId);
+            revert EquipmentNotFound(_equipmentId);
         }
         
         // Check if the equipment is certified or deprecated
         if (equipment.status != NuclearCertificationStorage.EquipmentStatus.Certified &&
             equipment.status != NuclearCertificationStorage.EquipmentStatus.Deprecated) {
-            revert NuclearCertificationStorage.ActionNotAllowedInCurrentStep(_equipmentId, equipment.currentStep);
+            revert ActionNotAllowedInCurrentStep(_equipmentId, equipment.currentStep);
         }
         
-        // Access certification data
-        NuclearCertificationStorage.CertificationData memory certData = storageContract.getEquipmentCertification(_equipmentId);
-        bool isValid = certData.hashGlobal == _calculatedHash;
+        bool isValid = equipment.finalCertificationHash == _calculatedHash;
         
         return isValid;
     }
@@ -378,10 +426,10 @@ contract NuclearCertificationImpl {
      * @param _calculatedHash The global hash calculated off-chain
      * @return bool True if the hash matches, false otherwise
      */
-    function checkAndLogEquipmentIntegrity(
-        uint256 _equipmentId, 
-        bytes32 _calculatedHash
-    ) external returns (bool) {
+    function checkAndLogEquipmentIntegrity(uint256 _equipmentId, bytes32 _calculatedHash)
+        external
+        returns (bool)
+    {
         bool isValid = verifyEquipmentIntegrity(_equipmentId, _calculatedHash);
         
         emit IntegrityVerified(_equipmentId, _calculatedHash, isValid, msg.sender, block.timestamp);
@@ -390,11 +438,15 @@ contract NuclearCertificationImpl {
     }
 
     /**
-     * @notice Checks if the caller has access to a specific document
+     * @notice Checks if the caller has access to a specific document based on roles and ownership
      * @param _documentId ID of the document to check
      * @return true if access is allowed, false otherwise
      */
-    function isDocumentAccessible(uint256 _documentId) public view returns (bool) {
+    function isDocumentAccessible(uint256 _documentId)
+        public
+        view
+        returns (bool)
+    {
         NuclearCertificationStorage.Document memory doc = getDocument(_documentId);
         
         if (doc.submittedAt == 0) {
@@ -426,16 +478,20 @@ contract NuclearCertificationImpl {
     }
 
     /**
-     * @notice Checks if a user can access a document
+     * @notice Checks if a specific user can view a document based on roles and ownership
      * @param _documentId ID of the document to check
      * @param _viewer Address of the user who wants to view the document
      * @return bool True if access is allowed, false otherwise
      */
-    function canViewDocument(uint256 _documentId, address _viewer) public view returns (bool) {
+    function canViewDocument(uint256 _documentId, address _viewer)
+        public
+        view
+        returns (bool)
+    {
         NuclearCertificationStorage.Document memory doc = getDocument(_documentId);
         
         if (doc.submittedAt == 0) {
-            revert NuclearCertificationStorage.DocumentNotFound(_documentId);
+            revert DocumentNotFound(_documentId);
         }
         
         // The submitter of a document can always access it
@@ -457,15 +513,15 @@ contract NuclearCertificationImpl {
     }
 
     /**
-     * @notice Retrieves a document if the user has access to it
+     * @notice Retrieves a document if the caller is authorized to view it
      * @param _documentId ID of the document to retrieve
      * @return The requested document
      */
-    function getDocumentIfAuthorized(uint256 _documentId) 
-        external 
-        view 
-        onlyDocumentAuthorized(_documentId) 
-        returns (NuclearCertificationStorage.Document memory) 
+    function getDocumentIfAuthorized(uint256 _documentId)
+        external
+        view
+        onlyDocumentAuthorized(_documentId)
+        returns (NuclearCertificationStorage.Document memory)
     {
         return getDocument(_documentId);
     }
@@ -474,7 +530,11 @@ contract NuclearCertificationImpl {
      * @notice Gets all plants registered in the storage contract
      * @return Array of Plant structs
      */
-    function getAllPlants() external view returns (NuclearCertificationStorage.Plant[] memory) {
+    function getAllPlants()
+        external
+        view
+        returns (NuclearCertificationStorage.Plant[] memory)
+    {
         uint256[] memory plantIds = storageContract.getAllPlantIds();
         NuclearCertificationStorage.Plant[] memory allPlants = new NuclearCertificationStorage.Plant[](plantIds.length);
 
@@ -501,9 +561,15 @@ contract NuclearCertificationImpl {
 
     /**
      * @notice Gets all actors with their roles
+     * @dev Requires caller to have DEFAULT_ADMIN_ROLE, PLANT_OPERATOR_ADMIN, or REGULATORY_AUTHORITY
      * @return Array of Actor structs
      */
-    function getAllActorsWithRoles() external view canViewActors returns (NuclearCertificationStorage.Actor[] memory) {
+    function getAllActorsWithRoles()
+        external
+        view
+        canViewActors
+        returns (NuclearCertificationStorage.Actor[] memory)
+    {
         uint256[] memory actorIds = storageContract.getAllActorIds();
         NuclearCertificationStorage.Actor[] memory allActors = new NuclearCertificationStorage.Actor[](actorIds.length);
 
@@ -516,31 +582,22 @@ contract NuclearCertificationImpl {
 
     /**
      * @notice Gets all actors associated with a specific plant
+     * @dev Requires caller to have DEFAULT_ADMIN_ROLE, PLANT_OPERATOR_ADMIN, or REGULATORY_AUTHORITY
      * @param _plantId ID of the plant
      * @return Array of Actor structs
      */
-    function getAllActorsWithRolesByPlant(uint256 _plantId) external view canViewActors returns (NuclearCertificationStorage.Actor[] memory) {
-        uint256[] memory actorIds = storageContract.getAllActorIds();
+    function getAllActorsWithRolesByPlant(uint256 _plantId)
+        external
+        view
+        canViewActors
+        returns (NuclearCertificationStorage.Actor[] memory)
+    {
+        uint256[] memory actorIds = storageContract.getPlantActorIds(_plantId);
         
-        // First count how many actors are associated with this plant
-        uint256 count = 0;
+        NuclearCertificationStorage.Actor[] memory plantActors = new NuclearCertificationStorage.Actor[](actorIds.length);
+        
         for (uint i = 0; i < actorIds.length; i++) {
-            NuclearCertificationStorage.Actor memory actor = storageContract.getActor(actorIds[i]);
-            if (actor.plantId == _plantId) {
-                count++;
-            }
-        }
-        
-        // Then create array of the right size and populate it
-        NuclearCertificationStorage.Actor[] memory plantActors = new NuclearCertificationStorage.Actor[](count);
-        
-        uint256 index = 0;
-        for (uint i = 0; i < actorIds.length; i++) {
-            NuclearCertificationStorage.Actor memory actor = storageContract.getActor(actorIds[i]);
-            if (actor.plantId == _plantId) {
-                plantActors[index] = actor;
-                index++;
-            }
+            plantActors[i] = storageContract.getActor(actorIds[i]);
         }
         
         return plantActors;
@@ -562,6 +619,7 @@ contract NuclearCertificationImpl {
 
     /**
      * @notice Gets all documents associated with a specific plant
+     * @dev Requires caller to have DEFAULT_ADMIN_ROLE, PLANT_OPERATOR_ADMIN, or REGULATORY_AUTHORITY
      * @param _plantId ID of the plant
      * @return Array of Document structs
      */
@@ -573,13 +631,11 @@ contract NuclearCertificationImpl {
     {
         uint256[] memory equipmentIds = storageContract.getPlantEquipmentIds(_plantId);
         
-        // First count the total number of documents for all equipment in the plant
         uint256 totalDocumentsCount = 0;
         for (uint i = 0; i < equipmentIds.length; i++) {
             totalDocumentsCount += storageContract.getEquipmentDocuments(equipmentIds[i]).length;
         }
         
-        // Create the array to store all documents
         NuclearCertificationStorage.Document[] memory allPlantDocuments = new NuclearCertificationStorage.Document[](totalDocumentsCount);
         uint256 docIndex = 0;
         
@@ -597,14 +653,15 @@ contract NuclearCertificationImpl {
 
     /**
      * @notice Gets all equipment associated with a specific plant
+     * @dev Requires caller to have DEFAULT_ADMIN_ROLE, PLANT_OPERATOR_ADMIN, or REGULATORY_AUTHORITY
      * @param _plantId ID of the plant
      * @return Array of Equipment structs
      */
-    function getEquipmentByPlant(uint256 _plantId) 
-        external 
-        view 
+    function getEquipmentByPlant(uint256 _plantId)
+        external
+        view
         canViewPlantDocuments
-        returns (NuclearCertificationStorage.Equipment[] memory) 
+        returns (NuclearCertificationStorage.Equipment[] memory)
     {
         uint256[] memory equipmentIds = storageContract.getPlantEquipmentIds(_plantId);
         NuclearCertificationStorage.Equipment[] memory plantEquipment = new NuclearCertificationStorage.Equipment[](equipmentIds.length);
@@ -632,10 +689,12 @@ contract NuclearCertificationImpl {
         string memory _description,
         string memory _location,
         bool _isActive
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Use the storage contract to create a new plant, passing msg.sender
-        /* uint256 plantId = */ storageContract.createPlant(
-            msg.sender, // Pass msg.sender as the creator
+    )
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        storageContract.createPlant(
+            msg.sender,
             _name,
             _description,
             _location,
@@ -653,16 +712,18 @@ contract NuclearCertificationImpl {
         string memory _name,
         string memory _description,
         uint256 _plantId
-    ) external onlyRole(PLANT_OPERATOR_ADMIN) {
-        // Check plant existence using the public getter function
+    )
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+    {
         NuclearCertificationStorage.Plant memory plant = storageContract.getPlant(_plantId);
         
         if (bytes(_name).length == 0) {
-            revert NuclearCertificationStorage.InvalidInput("Name cannot be empty");
+            revert InvalidInput("Name cannot be empty");
         }
         
         if (plant.registeredAt == 0) {
-            revert NuclearCertificationStorage.PlantNotFound(_plantId);
+            revert PlantNotFound(_plantId);
         }
         
         storageContract.createEquipment(msg.sender, _name, _description, _plantId);
@@ -682,23 +743,28 @@ contract NuclearCertificationImpl {
         string memory _name,
         string memory _description,
         string memory _ipfsHash
-    ) external authorizedSubmitter notCertifiedOrUnderReview(_equipmentId) notDeprecated(_equipmentId) {
+    )
+        external
+        authorizedSubmitter
+        notCertifiedOrUnderReview(_equipmentId)
+        notDeprecated(_equipmentId)
+    {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
         if (equipment.registeredAt == 0) {
-            revert NuclearCertificationStorage.EquipmentNotFound(_equipmentId);
+            revert EquipmentNotFound(_equipmentId);
         }
         
         if (bytes(_name).length == 0) {
-            revert NuclearCertificationStorage.InvalidInput("Name cannot be empty");
+            revert InvalidInput("Name cannot be empty");
         }
         
         if (bytes(_description).length == 0) {
-            revert NuclearCertificationStorage.InvalidInput("Description cannot be empty");
+            revert InvalidInput("Description cannot be empty");
         }
         
         if (bytes(_ipfsHash).length == 0) {
-            revert NuclearCertificationStorage.InvalidInput("IPFS hash cannot be empty");
+            revert InvalidInput("IPFS hash cannot be empty");
         }
         
         storageContract.createDocument(
@@ -712,26 +778,132 @@ contract NuclearCertificationImpl {
     }
 
     /**
-     * @notice Marks an equipment as ready for review
+     * @notice Marks an equipment as ready for review by Plant Operator Admin
      * @param _equipmentId Equipment ID
      */
-    function equipmentIsReadyForReview(uint256 _equipmentId) 
-        external 
-        onlyRole(PLANT_OPERATOR_ADMIN) 
-        notCertifiedOrUnderReview(_equipmentId) 
-        notDeprecated(_equipmentId) 
+    function equipmentIsReadyForReview(uint256 _equipmentId)
+        external
+        onlyRole(PLANT_OPERATOR_ADMIN)
+        notCertifiedOrUnderReview(_equipmentId)
+        notDeprecated(_equipmentId)
     {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
         if (equipment.status != NuclearCertificationStorage.EquipmentStatus.Pending) {
-            revert NuclearCertificationStorage.EquipmentNotPending(_equipmentId);
+            revert EquipmentNotPending(_equipmentId);
         }
 
         storageContract.updateEquipmentStatus(
             msg.sender,
             _equipmentId,
-            equipment.status, // Keep current status (Pending)
-            NuclearCertificationStorage.CertificationSteps.UnderReview // Update step to UnderReview
+            NuclearCertificationStorage.EquipmentStatus.Pending, 
+            NuclearCertificationStorage.CertificationSteps.ReadyForReview // Step is now ReadyForReview
         );        
-    }    
+    }
+
+    /**
+     * @notice Initiates the review of an equipment by the Regulatory Authority
+     * @param _equipmentId ID of the equipment to review
+     */
+    function reviewEquipment(uint256 _equipmentId)
+        external
+        onlyRole(REGULATORY_AUTHORITY)
+        notDeprecated(_equipmentId)
+    {
+        NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
+
+        if (equipment.currentStep != NuclearCertificationStorage.CertificationSteps.ReadyForReview) {
+            revert ActionNotAllowedInCurrentStep(_equipmentId, equipment.currentStep);
+        }
+
+        storageContract.updateEquipmentStatus(
+            msg.sender,
+            _equipmentId,
+            NuclearCertificationStorage.EquipmentStatus.Pending,
+            NuclearCertificationStorage.CertificationSteps.UnderReview
+        );
+
+        emit ReviewStarted(_equipmentId, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice Finalizes the certification process for an equipment (Approve or Reject)
+     * @param _equipmentId ID of the equipment
+     * @param _approve True to approve, False to reject
+     * @param _finalHash Hash of all document hashes (ignored if rejecting)
+     * @param _reason Reason for rejection (ignored if approving)
+     */
+    function finalizeCertification(
+        uint256 _equipmentId,
+        bool _approve,
+        bytes32 _finalHash,
+        string memory _reason
+    )
+        external
+        onlyRole(REGULATORY_AUTHORITY)
+        notDeprecated(_equipmentId)
+    {
+        NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
+
+        if (equipment.currentStep != NuclearCertificationStorage.CertificationSteps.UnderReview) {
+            revert EquipmentNotUnderReview(_equipmentId);
+        }
+
+        NuclearCertificationStorage.EquipmentStatus newStatus;
+        NuclearCertificationStorage.CertificationSteps newStep;
+        string memory finalReason = "";
+        bytes32 eventHash = bytes32(0);
+
+        if (_approve) {
+            newStatus = NuclearCertificationStorage.EquipmentStatus.Certified;
+            newStep = NuclearCertificationStorage.CertificationSteps.Certified;
+            if (_finalHash == bytes32(0)) {
+                revert InvalidInput("Final certification hash cannot be empty for approval");
+            }
+            storageContract.setFinalCertificationHash(_equipmentId, _finalHash);
+            eventHash = _finalHash;
+        } else {
+            newStatus = NuclearCertificationStorage.EquipmentStatus.Rejected;
+            newStep = NuclearCertificationStorage.CertificationSteps.Rejected;
+            if (bytes(_reason).length == 0) {
+                 revert InvalidInput("Rejection reason cannot be empty");
+            }
+            finalReason = _reason;
+            storageContract.setRejectionReason(_equipmentId, finalReason);
+            storageContract.setFinalCertificationHash(_equipmentId, bytes32(0));
+        }
+
+        storageContract.updateEquipmentStatus(
+            msg.sender,
+            _equipmentId,
+            newStatus,
+            newStep
+        );
+
+        emit CertificationFinalized(_equipmentId, msg.sender, _approve, eventHash, finalReason, block.timestamp);
+    }
+
+    /**
+     * @notice Marks an equipment as deprecated by the Regulatory Authority
+     * @param _equipmentId ID of the equipment to deprecate
+     */
+    function deprecateEquipment(uint256 _equipmentId)
+        external
+        onlyRole(REGULATORY_AUTHORITY)
+    {
+        NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
+
+        if (equipment.status == NuclearCertificationStorage.EquipmentStatus.Deprecated) {
+            revert EquipmentAlreadyDeprecated(_equipmentId);
+        }
+
+        storageContract.updateEquipmentStatus(
+            msg.sender,
+            _equipmentId,
+            NuclearCertificationStorage.EquipmentStatus.Deprecated,
+            equipment.currentStep // Keep current step 
+        );
+
+        emit EquipmentDeprecated(_equipmentId, msg.sender, block.timestamp);
+    }
 } 
