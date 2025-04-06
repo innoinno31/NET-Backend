@@ -5,11 +5,17 @@ const NuclearCertificationImplModule = buildModule('NuclearCertificationImplModu
 
   const { nuclearCertificationStorage } = m.useModule(StorageModule)
 
+  // 1. Deploy Impl, passing the Storage contract address
   const nuclearCertificationImpl = m.contract('NuclearCertificationImpl', [
     nuclearCertificationStorage
   ])
 
-  return { nuclearCertificationImpl }
+  // 2. Call setImplementationContract on Storage, passing the Impl address
+  m.call(nuclearCertificationStorage, "setImplementationContract", [
+    nuclearCertificationImpl
+  ])
+
+  return { nuclearCertificationImpl, nuclearCertificationStorage }
 })
 
 export default NuclearCertificationImplModule
