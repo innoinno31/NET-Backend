@@ -765,8 +765,8 @@ contract NuclearCertificationStorage is AccessControl, ERC721 {
         _actors[actorId] = newActor;
         _allActorIds.push(actorId);
 
-        // Add actor to the plant's list if associated with a specific plant
-        if (_plantId != 0 && _plants[_plantId].registeredAt != 0) {
+        // Add actor to the plant's list if associated with a specific plant (and the plant exists)
+        if (_plants[_plantId].registeredAt != 0) {
              _plantToActorIds[_plantId].push(actorId);
         }
         

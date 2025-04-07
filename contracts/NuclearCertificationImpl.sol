@@ -69,6 +69,13 @@ contract NuclearCertificationImpl {
         uint256 timestamp
     );
 
+    event DebugHashComparison(
+        uint256 indexed equipmentId,
+        bytes32 storedHash,
+        bytes32 receivedHash,
+        bool comparisonResult
+    );
+
     /**
      * @notice Initialize the contract with a reference to the storage contract
      * @param _storageAddress Address of the storage contract
@@ -673,6 +680,34 @@ contract NuclearCertificationImpl {
         return plantEquipment;
     }
 
+    /**
+     * @notice Gets all documents associated with a specific equipment
+     * @dev Requires caller to have DEFAULT_ADMIN_ROLE, PLANT_OPERATOR_ADMIN, or REGULATORY_AUTHORITY
+     * @param _equipmentId ID of the equipment
+     * @return Array of Document structs
+     */
+    function getAllDocumentsForEquipment(uint256 _equipmentId)
+        external
+        view
+        canViewPlantDocuments // Re-using existing modifier for simplicity
+        returns (NuclearCertificationStorage.Document[] memory)
+    {
+        // Check if equipment exists first to provide a better error than an empty array
+        NuclearCertificationStorage.Equipment memory equipment = storageContract.getEquipment(_equipmentId);
+        if (equipment.registeredAt == 0) {
+            revert EquipmentNotFound(_equipmentId);
+        }
+
+        uint256[] memory docIds = storageContract.getEquipmentDocuments(_equipmentId);
+        NuclearCertificationStorage.Document[] memory equipmentDocuments = new NuclearCertificationStorage.Document[](docIds.length);
+
+        for (uint i = 0; i < docIds.length; i++) {
+            equipmentDocuments[i] = storageContract.getDocument(docIds[i]);
+        }
+
+        return equipmentDocuments;
+    }
+
     /////////////////////////////////
     /////// FUNCTIONS //////////////
     /////////////////////////////////
@@ -789,15 +824,15 @@ contract NuclearCertificationImpl {
     {
         NuclearCertificationStorage.Equipment memory equipment = getEquipment(_equipmentId);
         
-        if (equipment.status != NuclearCertificationStorage.EquipmentStatus.Pending) {
-            revert EquipmentNotPending(_equipmentId);
+        if (equipment.status != NuclearCertificationStorage.EquipmentStatus.Registered) {
+            revert ActionNotAllowedInCurrentStep(_equipmentId, equipment.currentStep);
         }
 
         storageContract.updateEquipmentStatus(
             msg.sender,
             _equipmentId,
-            NuclearCertificationStorage.EquipmentStatus.Pending, 
-            NuclearCertificationStorage.CertificationSteps.ReadyForReview // Step is now ReadyForReview
+            NuclearCertificationStorage.EquipmentStatus.Pending,
+            NuclearCertificationStorage.CertificationSteps.ReadyForReview
         );        
     }
 
