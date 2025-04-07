@@ -1,6 +1,7 @@
 # Nuclear Equipment Traceability (NET)
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![CI Status](https://github.com/innoinno31/NET-Backend/actions/workflows/ci.yml/badge.svg)
 
 ## 🧾 Description
 
@@ -45,6 +46,28 @@ npx hardhat compile
 
 # Lancer les tests
 npx hardhat test
+```
+
+## 🔄 Intégration Continue (CI/CD)
+
+Le projet dispose d'un pipeline qui s'exécute automatiquement à chaque push sur `main` et à chaque pull request, assurant que :
+- Les contrats compilent sans erreur
+- Tous les tests passent avec succès
+
+## 📊 Couverture de Tests
+
+Le projet maintient une couverture de tests rigoureuse pour garantir la qualité et la sécurité du code :
+
+| Contrat                        | Instructions | Branches | Fonctions | Lignes   |
+|--------------------------------|-------------|----------|-----------|----------|
+| **Global**                     | 90.23%      | 70.98%   | 88.24%    | 84.36%   |
+| NuclearCertificationImpl.sol   | 89.44%      | 67.06%   | 94.74%    | 81.48%   |
+| NuclearCertificationStorage.sol| 91.78%      | 83.33%   | 80%       | 88.98%   |
+
+Pour générer le rapport de couverture :
+
+```bash
+npx hardhat coverage
 ```
 
 ## 🚀 Déploiement
